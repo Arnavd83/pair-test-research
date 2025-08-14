@@ -16,7 +16,8 @@ def load_attack_and_target_models(args):
                         category = args.category,
                         max_n_tokens = args.target_max_n_tokens,
                         evaluate_locally = args.evaluate_locally,
-                        phase = args.jailbreakbench_phase
+                        phase = args.jailbreakbench_phase,
+                        use_jailbreakbench = args.use_jailbreakbench
                         )
     
     return attackLM, targetLM
@@ -177,6 +178,11 @@ class TargetLM():
 
         self.model = load_indiv_model(model_name, evaluate_locally, use_jailbreakbench)            
         self.category = category
+        
+        # Set template for conversation formatting when not using jailbreakbench
+        if not use_jailbreakbench:
+            from config import FASTCHAT_TEMPLATE_NAMES, Model
+            self.template = FASTCHAT_TEMPLATE_NAMES[Model(model_name)]
 
     def get_response(self, prompts_list):
         if self.use_jailbreakbench:

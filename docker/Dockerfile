@@ -11,4 +11,8 @@ RUN pip3 install fschat==0.2.23
 
 RUN pip3 install pandas seaborn matplotlib numpy datasets evaluate
 
-RUN pip install anthropic google-generativeai openai
+RUN pip install anthropic google-generativeai google-cloud-aiplatform openai
+
+RUN pip install litellm==1.35.0 wandb psutil
+
+RUN pip install jailbreakbench

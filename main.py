@@ -16,9 +16,6 @@ def memory_usage_psutil():
 def main(args):
     memory_before = memory_usage_psutil()
 
-
-
-
     # Initialize models and judge
     attackLM, targetLM = load_attack_and_target_models(args)
     judgeLM = load_judge(args)
