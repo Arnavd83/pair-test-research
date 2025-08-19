@@ -62,14 +62,35 @@ class GPTJudge(JudgeBase):
         conv = get_conversation_template(self.judge_name)
         conv.set_system_message(self.system_prompt)
         conv.append_message(conv.roles[0], full_prompt)
+        # Debug: Inspect the constructed conversation before sending to the API
+        try:
+            logger.debug("[GPTJudge] System prompt (truncated): %s", (self.system_prompt[:300] + '...') if len(self.system_prompt) > 300 else self.system_prompt)
+            logger.debug("[GPTJudge] User message (truncated): %s", (full_prompt[:300] + '...') if len(full_prompt) > 300 else full_prompt)
+        except Exception as e:
+            logger.debug("[GPTJudge] Failed to log conversation: %s", e)
         return conv.to_openai_api_messages()
 
     def score(self, attack_prompt_list, target_response_list):
         convs_list = [self.create_conv(self.get_judge_prompt(prompt, response)) for prompt, response in zip(attack_prompt_list, target_response_list)]
-        raw_outputs = self.judge_model.batched_generate(convs_list, 
-                                                        max_n_tokens = self.max_n_tokens,
-                                                        temperature = self.temperature,
-                                                        top_p=1)
+        # Debug: Log a summary of the conversations to be sent
+        try:
+            logger.debug("[GPTJudge] Prepared %d conversations for model %s", len(convs_list), self.judge_name)
+            if len(convs_list) > 0:
+                logger.debug("[GPTJudge] First conversation messages: %s", convs_list[0])
+        except Exception as e:
+            logger.debug("[GPTJudge] Failed to log prepared conversations: %s", e)
+
+        raw_outputs = self.judge_model.batched_generate(
+            convs_list,
+            max_n_tokens=self.max_n_tokens,
+            temperature=self.temperature,
+            top_p=1,
+        )
+        # Debug: Log raw outputs from the API before parsing
+        try:
+            logger.debug("[GPTJudge] Raw outputs: %s", raw_outputs)
+        except Exception as e:
+            logger.debug("[GPTJudge] Failed to log raw outputs: %s", e)
         outputs = [self.process_output(raw_output) for raw_output in raw_outputs]
         return outputs
     
