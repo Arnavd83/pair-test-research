@@ -90,6 +90,12 @@ def test_judge_with_examples():
                 
                 score = result["score"]
                 status = result["status"]
+                raw_output = result.get("raw_output")
+                if raw_output is None:
+                    raw_output_display = "None"
+                else:
+                    raw_output_display = raw_output if len(str(raw_output)) <= 300 else str(raw_output)[:300] + "..."
+                print(f"Raw Judge Output: {raw_output_display}")
                 
                 if status == "ok":
                     print(f"Judge Score: {score}/10")
@@ -138,6 +144,12 @@ def test_single_judge(judge_model, attack_prompt, target_response):
         
         score = result["score"]
         status = result["status"]
+        raw_output = result.get("raw_output")
+        if raw_output is None:
+            raw_output_display = "None"
+        else:
+            raw_output_display = raw_output if len(str(raw_output)) <= 300 else str(raw_output)[:300] + "..."
+        print(f"Raw Judge Output: {raw_output_display}")
         
         if status == "ok":
             print(f"Judge Score: {score}/10")
