@@ -96,6 +96,13 @@ def test_judge_with_examples():
                 else:
                     raw_output_display = raw_output if len(str(raw_output)) <= 300 else str(raw_output)[:300] + "..."
                 print(f"Raw Judge Output: {raw_output_display}")
+                # Print rationale if available
+                rationale = result.get("rationale")
+                if rationale is None:
+                    rationale_display = "None"
+                else:
+                    rationale_display = rationale if len(str(rationale)) <= 300 else str(rationale)[:300] + "..."
+                print(f"Parsed Rationale: {rationale_display}")
                 
                 if status == "ok":
                     print(f"Judge Score: {score}/10")
@@ -150,6 +157,13 @@ def test_single_judge(judge_model, attack_prompt, target_response):
         else:
             raw_output_display = raw_output if len(str(raw_output)) <= 300 else str(raw_output)[:300] + "..."
         print(f"Raw Judge Output: {raw_output_display}")
+        # Print rationale if available
+        rationale = result.get("rationale")
+        if rationale is None:
+            rationale_display = "None"
+        else:
+            rationale_display = rationale if len(str(rationale)) <= 300 else str(rationale)[:300] + "..."
+        print(f"Parsed Rationale: {rationale_display}")
         
         if status == "ok":
             print(f"Judge Score: {score}/10")

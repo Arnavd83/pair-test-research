@@ -7,6 +7,7 @@
 .env.test
 *.env
 env.py
+!.env.example
 config_local.py
 secrets.py
 api_keys.py
