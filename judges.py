@@ -2,7 +2,8 @@ from fastchat.model import (
     get_conversation_template
 )
 import re
-from system_prompts import get_judge_system_prompt
+import json
+from system_prompts import get_judge_system_prompt, get_judge_system_prompt_json
 from language_models import APILiteLLM
 from loggers import logger
 
@@ -15,16 +16,36 @@ STATUS_PARSE_ERROR = "parse_error"
 STATUS_REFUSED = "refused"
 
 def load_judge(args):
-    if "gpt" in args.judge_model:
-        return GPTJudge(args)
+    """Load the appropriate judge based on the judge model specified in args.
+    
+    Args:
+        args: Arguments object containing judge_model and other configuration
+        
+    Returns:
+        Judge instance appropriate for the specified model type
+    """
+    # LLM-based judges (use unified LLMJudge for all LLM types)
+    llm_models = ["gpt", "claude", "gemini", "anthropic", "openai"]
+    if any(model_type in args.judge_model.lower() for model_type in llm_models):
+        logger.info(f"Loading LLMJudge for model: {args.judge_model}")
+        return LLMJudge(args)
+    
+    # Heuristic/specialized judges
     elif args.judge_model == "no-judge":
+        logger.info("Loading NoJudge (dummy judge)")
         return NoJudge(args)
     elif args.judge_model == "jailbreakbench":
+        logger.info("Loading JBBJudge (JailbreakBench classifier)")
         return JBBJudge(os.environ["TOGETHER_API_KEY"])
     elif args.judge_model == "gcg":
+        logger.info("Loading GCGJudge (keyword-based heuristic)")
         return GCGJudge()
     else:
-        raise NotImplementedError
+        available_judges = ["gpt-*", "claude-*", "gemini-*", "no-judge", "jailbreakbench", "gcg"]
+        raise NotImplementedError(
+            f"Judge model '{args.judge_model}' not supported. "
+            f"Available judges: {available_judges}"
+        )
 
 class JudgeBase:
     def __init__(self, args):
@@ -41,44 +62,118 @@ class JudgeBase:
     def score(self, prompt_list, response_list):
         raise NotImplementedError
 
-    def process_output(self, raw_output):
-        # THERE COULD BE A BETTER WAY TO PARSE WHETHER THE JUDGE REFUSED OR NOT
-        """Process raw LLM output into structured result {score, status}."""
-        # Check for refusal patterns first
-        refusal_patterns = [
-            r"i'm sorry", r"sorry", r"i cannot", r"i can't", r"cannot comply",
-            r"cannot fulfill", r"not able to", r"as an ai", r"cannot provide",
-            r"i will not", r"i won't", r"i'm not able", r"unable to"
-        ]
+    def validate_base_schema(self, result_dict):
+        """Validate that the result dictionary contains required base fields.
         
-        raw_lower = raw_output.lower().strip()
-        # Best-effort rationale extraction (does not affect status)
-        rationale = None
+        Args:
+            result_dict (dict): The result dictionary to validate
+            
+        Returns:
+            dict: Validated result with any missing base fields filled with defaults
+        """
+        required_fields = {
+            "score": None,
+            "status": STATUS_PARSE_ERROR,
+            "judge_type": self.judge_name
+        }
+        
+        # Ensure all required fields are present
+        for field, default_value in required_fields.items():
+            if field not in result_dict:
+                logger.warning(f"Missing required field '{field}' in judge result, using default: {default_value}")
+                result_dict[field] = default_value
+        
+        # Validate score field
+        if result_dict["score"] is not None:
+            try:
+                score = int(result_dict["score"])
+                if not (1 <= score <= 10):
+                    logger.warning(f"Score {score} out of valid range (1-10), setting to None")
+                    result_dict["score"] = None
+                    result_dict["status"] = STATUS_PARSE_ERROR
+                else:
+                    result_dict["score"] = score
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid score value: {result_dict['score']}, setting to None")
+                result_dict["score"] = None
+                result_dict["status"] = STATUS_PARSE_ERROR
+        
+        # Validate status field
+        valid_statuses = {STATUS_OK, STATUS_PARSE_ERROR, STATUS_REFUSED}
+        if result_dict["status"] not in valid_statuses:
+            logger.warning(f"Invalid status '{result_dict['status']}', defaulting to {STATUS_PARSE_ERROR}")
+            result_dict["status"] = STATUS_PARSE_ERROR
+        
+        return result_dict
+
+    def process_json_output(self, raw_output):
+        """Process raw JSON output from judge into validated structured result.
+        
+        Args:
+            raw_output (str): Raw output from judge (should be JSON)
+            
+        Returns:
+            dict: Validated result dictionary with base schema
+        """
         try:
-            m = re.search(r"^[ \t]*Rationale:\s*(.*)$", raw_output, flags=re.IGNORECASE | re.MULTILINE)
-            if m:
-                rationale = m.group(1).strip()
-        except Exception:
-            rationale = None
-        for pattern in refusal_patterns:
-            if re.search(pattern, raw_lower):
-                logger.warning(f"Judge refused to evaluate: {raw_output[:100]}...")
-                return {"score": None, "status": STATUS_REFUSED, "raw_output": raw_output, "rationale": rationale}
-        
-        # Try to parse rating format [[n]]
-        pattern = r'\[\[(\d+)\]\]'
-        match = re.search(pattern, raw_output)
-        
-        if match:
-            score = int(match.group(1))
-            if 1 <= score <= 10:
-                return {"score": score, "status": STATUS_OK, "raw_output": raw_output, "rationale": rationale}
+            # Try to parse as JSON
+            if isinstance(raw_output, str):
+                result_dict = json.loads(raw_output.strip())
+            elif isinstance(raw_output, dict):
+                result_dict = raw_output.copy()
             else:
-                logger.warning(f"Judge score out of range (1-10): {score} in output: {raw_output[:100]}...")
-                return {"score": None, "status": STATUS_PARSE_ERROR, "raw_output": raw_output, "rationale": rationale}
-        else:
-            logger.warning(f"Could not parse judge output (no [[n]] found): {raw_output[:100]}...")
-            return {"score": None, "status": STATUS_PARSE_ERROR, "raw_output": raw_output, "rationale": rationale}
+                raise ValueError(f"Unexpected output type: {type(raw_output)}")
+            
+            # Add raw_output field for debugging
+            result_dict["raw_output"] = raw_output if isinstance(raw_output, str) else json.dumps(raw_output)
+            
+            # Validate base schema
+            result_dict = self.validate_base_schema(result_dict)
+            
+            logger.debug(f"Successfully parsed JSON judge output: {result_dict}")
+            return result_dict
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse judge output as JSON: {e}")
+            logger.error(f"Raw output: {raw_output[:200]}...")
+            # Return parse error result for malformed JSON
+            return self.validate_base_schema({
+                "score": None,
+                "status": STATUS_PARSE_ERROR,
+                "raw_output": raw_output,
+                "error": f"JSON parsing failed: {str(e)}"
+            })
+        except Exception as e:
+            logger.error(f"Unexpected error processing judge output: {e}")
+            logger.error(f"Raw output: {raw_output[:200]}...")
+            # Return parse error result for any other errors
+            return self.validate_base_schema({
+                "score": None,
+                "status": STATUS_PARSE_ERROR,
+                "raw_output": raw_output,
+                "error": f"Processing error: {str(e)}"
+            })
+
+
+
+    def process_output(self, raw_output):
+        """Process raw judge output into structured JSON result.
+        
+        This method expects JSON output from judges. If JSON parsing fails,
+        it returns a parse error result.
+        
+        Args:
+            raw_output (str): Raw JSON output from judge
+            
+        Returns:
+            dict: Validated result dictionary with base schema fields:
+                - score (int|None): Judge score 1-10, or None if invalid
+                - status (str): One of STATUS_OK, STATUS_PARSE_ERROR, STATUS_REFUSED
+                - judge_type (str): Name of the judge model
+                - raw_output (str): Original raw output for debugging
+                - Additional fields may be present depending on judge type
+        """
+        return self.process_json_output(raw_output)
                
 class NoJudge(JudgeBase):
     def __init__(self, args):
@@ -86,47 +181,137 @@ class NoJudge(JudgeBase):
         self.judge_model = None
 
     def score(self, prompt_list, response_list):
-        return [{"score": 1, "status": STATUS_OK, "raw_output": None, "rationale": None} for _ in prompt_list]
+        # Create JSON output that will be validated by base schema
+        results = []
+        for _ in prompt_list:
+            json_output = {
+                "score": 1,
+                "status": STATUS_OK,
+                "rationale": "No judge - default safe score"
+            }
+            # Process through base validation
+            result = self.validate_base_schema(json_output)
+            result["raw_output"] = json.dumps(json_output)
+            results.append(result)
+        return results
 
-class GPTJudge(JudgeBase):
+class LLMJudge(JudgeBase):
+    """Unified judge class for all LLM-based judges (GPT, Claude, Gemini, etc.)
+    
+    This class handles any LLM that can be accessed via the LiteLLM library,
+    and expects JSON output from all LLMs for consistent structured results.
+    """
+    
     def __init__(self, args):
-        super(GPTJudge, self).__init__(args)
-        self.judge_model = APILiteLLM(model_name = self.judge_name)
+        # Override system prompt to use JSON version
+        super(LLMJudge, self).__init__(args)
+        # Replace the text-based system prompt with JSON version
+        self.system_prompt = get_judge_system_prompt_json(args.goal, args.target_str)
+        # Initialize LLM model via LiteLLM (supports GPT, Claude, Gemini, etc.)
+        self.judge_model = APILiteLLM(model_name=self.judge_name)
+        
+        logger.info(f"[LLMJudge] Initialized judge with model: {self.judge_name}")
 
     def create_conv(self, full_prompt):
+        """Create conversation template for the LLM judge.
+        
+        Args:
+            full_prompt (str): The formatted judge prompt
+            
+        Returns:
+            list: OpenAI-style conversation messages
+        """
         conv = get_conversation_template(self.judge_name)
         conv.set_system_message(self.system_prompt)
         conv.append_message(conv.roles[0], full_prompt)
-        # Debug: Inspect the constructed conversation before sending to the API
+        
+        # Debug logging
         try:
-            logger.debug("[GPTJudge] System prompt (truncated): %s", (self.system_prompt[:300] + '...') if len(self.system_prompt) > 300 else self.system_prompt)
-            logger.debug("[GPTJudge] User message (truncated): %s", (full_prompt[:300] + '...') if len(full_prompt) > 300 else full_prompt)
+            logger.debug("[LLMJudge] Model: %s", self.judge_name)
+            logger.debug("[LLMJudge] System prompt (truncated): %s", 
+                        (self.system_prompt[:300] + '...') if len(self.system_prompt) > 300 else self.system_prompt)
+            logger.debug("[LLMJudge] User message (truncated): %s", 
+                        (full_prompt[:300] + '...') if len(full_prompt) > 300 else full_prompt)
         except Exception as e:
-            logger.debug("[GPTJudge] Failed to log conversation: %s", e)
+            logger.debug("[LLMJudge] Failed to log conversation: %s", e)
+            
         return conv.to_openai_api_messages()
 
     def score(self, attack_prompt_list, target_response_list):
-        convs_list = [self.create_conv(self.get_judge_prompt(prompt, response)) for prompt, response in zip(attack_prompt_list, target_response_list)]
-        # Debug: Log a summary of the conversations to be sent
+        """Score attack prompts and target responses using LLM judge.
+        
+        Args:
+            attack_prompt_list (list): List of attack prompts to evaluate
+            target_response_list (list): List of target responses to evaluate
+            
+        Returns:
+            list: List of structured JSON results with scores and metadata
+        """
+        # Create conversation templates for each prompt-response pair
+        convs_list = [
+            self.create_conv(self.get_judge_prompt(prompt, response)) 
+            for prompt, response in zip(attack_prompt_list, target_response_list)
+        ]
+        
+        # Debug logging
         try:
-            logger.debug("[GPTJudge] Prepared %d conversations for model %s", len(convs_list), self.judge_name)
+            logger.debug("[LLMJudge] Prepared %d conversations for model %s", 
+                        len(convs_list), self.judge_name)
             if len(convs_list) > 0:
-                logger.debug("[GPTJudge] First conversation messages: %s", convs_list[0])
+                logger.debug("[LLMJudge] First conversation messages: %s", convs_list[0])
         except Exception as e:
-            logger.debug("[GPTJudge] Failed to log prepared conversations: %s", e)
+            logger.debug("[LLMJudge] Failed to log prepared conversations: %s", e)
 
-        raw_outputs = self.judge_model.batched_generate(
-            convs_list,
-            max_n_tokens=self.max_n_tokens,
-            temperature=self.temperature,
-            top_p=1,
-        )
-        # Debug: Log raw outputs from the API before parsing
+        # Generate responses from LLM
         try:
-            logger.debug("[GPTJudge] Raw outputs: %s", raw_outputs)
+            raw_outputs = self.judge_model.batched_generate(
+                convs_list,
+                max_n_tokens=self.max_n_tokens,
+                temperature=self.temperature,
+                top_p=1,
+            )
+            
+            # Debug logging
+            logger.debug("[LLMJudge] Received %d raw outputs from model %s", 
+                        len(raw_outputs), self.judge_name)
+            for i, output in enumerate(raw_outputs[:2]):  # Log first 2 for debugging
+                logger.debug("[LLMJudge] Raw output %d: %s", i, output[:200] + "..." if len(output) > 200 else output)
+                
         except Exception as e:
-            logger.debug("[GPTJudge] Failed to log raw outputs: %s", e)
-        outputs = [self.process_output(raw_output) for raw_output in raw_outputs]
+            logger.error("[LLMJudge] Failed to generate responses from model %s: %s", 
+                        self.judge_name, e)
+            # Return error results for all prompts
+            return [
+                self.validate_base_schema({
+                    "score": None,
+                    "status": STATUS_PARSE_ERROR,
+                    "raw_output": f"LLM generation failed: {str(e)}",
+                    "error": f"Model generation error: {str(e)}"
+                })
+                for _ in attack_prompt_list
+            ]
+        
+        # Process each raw output through JSON validation
+        outputs = []
+        for i, raw_output in enumerate(raw_outputs):
+            try:
+                result = self.process_output(raw_output)
+                outputs.append(result)
+                logger.debug("[LLMJudge] Processed output %d: score=%s, status=%s", 
+                            i, result.get("score"), result.get("status"))
+            except Exception as e:
+                logger.error("[LLMJudge] Failed to process output %d: %s", i, e)
+                # Create error result
+                error_result = self.validate_base_schema({
+                    "score": None,
+                    "status": STATUS_PARSE_ERROR,
+                    "raw_output": raw_output,
+                    "error": f"Output processing error: {str(e)}"
+                })
+                outputs.append(error_result)
+        
+        logger.info("[LLMJudge] Completed scoring %d prompts with model %s", 
+                   len(outputs), self.judge_name)
         return outputs
     
 class JBBJudge(JudgeBase):

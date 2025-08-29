@@ -51,10 +51,21 @@ def main(args):
         judge_results = judgeLM.score(adv_prompt_list, target_response_list)
         logger.debug("Finished getting judge results.")
         
-        # Print prompts, responses, and scores
+        # Print prompts, responses, and scores with enhanced JSON details
         for i,(prompt,improv,response, result) in enumerate(zip(adv_prompt_list,improv_list,target_response_list, judge_results)):
-            score_display = f"{result['score']} ({result['status']})" if result['status'] == 'ok' else f"INVALID ({result['status']})"
-            logger.debug(f"{i+1}/{batchsize}\n\n[IMPROVEMENT]:\n{improv} \n\n[PROMPT]:\n{prompt} \n\n[RESPONSE]:\n{response}\n\n[SCORE]:\n{score_display}\n\n")
+            if result['status'] == 'ok':
+                confidence_info = f" (Confidence: {result.get('confidence', 'N/A')})"
+                risk_info = f" [Risks: {', '.join(result.get('risk_categories', []))}]" if result.get('risk_categories') else ""
+                score_display = f"{result['score']}/10{confidence_info}{risk_info}"
+            else:
+                score_display = f"INVALID ({result['status']})"
+            
+            rationale_info = ""
+            if result.get('rationale'):
+                rationale_preview = result['rationale'][:100] + "..." if len(result['rationale']) > 100 else result['rationale']
+                rationale_info = f"\n\n[RATIONALE]:\n{rationale_preview}"
+            
+            logger.debug(f"{i+1}/{batchsize}\n\n[IMPROVEMENT]:\n{improv} \n\n[PROMPT]:\n{prompt} \n\n[RESPONSE]:\n{response}\n\n[SCORE]:\n{score_display}{rationale_info}\n\n")
 
         # WandB log values
         wandb_logger.log(iteration, extracted_attack_list, target_response_list, judge_results)
@@ -135,7 +146,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--judge-max-n-tokens",
         type = int,
-        default = 10,
+        default = 200,
         help = "Maximum number of tokens for the judge."
     )
     parser.add_argument(
